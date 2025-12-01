@@ -1,0 +1,86 @@
+neural_network_framework/
+│
+├── README.md                           # Project documentation
+├── requirements.txt                    # Python dependencies
+├── setup.py                           # Package installation
+├── .gitignore                         # Git ignore file
+├── LICENSE                            # License file
+│
+├── src/
+│   └── neural_network/
+│       ├── __init__.py                # Package initialization
+│       ├── core/
+│       │   ├── __init__.py
+│       │   ├── layer.py               # Layer class
+│       │   ├── network.py             # NeuralNetwork class
+│       │   ├── optimizers.py          # Optimizer classes
+│       │   └── activations.py         # Activation functions
+│       ├── utils/
+│       │   ├── __init__.py
+│       │   ├── preprocessing.py       # Data preprocessing utilities
+│       │   ├── metrics.py             # Evaluation metrics
+│       │   ├── visualization.py       # Plotting functions
+│       │   └── model_io.py            # Model save/load functions
+│       └── datasets/
+│           ├── __init__.py
+│           └── loaders.py             # Dataset loading utilities
+│
+├── examples/
+│   ├── __init__.py
+│   ├── classification/
+│   │   ├── __init__.py
+│   │   ├── binary_classification.py   # Breast cancer example
+│   │   └── multiclass_classification.py # Multi-class example
+│   ├── regression/
+│   │   ├── __init__.py
+│   │   └── housing_prediction.py      # California housing example
+│   └── benchmarks/
+│       ├── __init__.py
+│       ├── performance_comparison.py  # vs sklearn benchmarks
+│       └── speed_tests.py             # Performance profiling
+│
+├── tests/
+│   ├── __init__.py
+│   ├── test_activations.py            # Test activation functions
+│   ├── test_optimizers.py             # Test optimizers
+│   ├── test_layer.py                  # Test layer functionality
+│   ├── test_network.py                # Test neural network
+│   ├── test_utils.py                  # Test utilities
+│   └── test_integration.py            # Integration tests
+│
+├── notebooks/
+│   ├── 01_getting_started.ipynb       # Tutorial notebook
+│   ├── 02_advanced_features.ipynb     # Advanced features demo
+│   ├── 03_real_world_examples.ipynb   # Real-world applications
+│   └── 04_benchmarks.ipynb            # Performance analysis
+│
+├── models/
+│   ├── saved_models/                  # Directory for saved models
+│   └── checkpoints/                   # Training checkpoints
+│
+├── data/
+│   ├── raw/                           # Raw datasets
+│   ├── processed/                     # Preprocessed datasets
+│   └── external/                      # External datasets
+│
+├── configs/
+│   ├── model_configs.yaml             # Model architecture configs
+│   ├── training_configs.yaml          # Training hyperparameters
+│   └── dataset_configs.yaml           # Dataset configurations
+│
+├── scripts/
+│   ├── train.py                       # Training script
+│   ├── evaluate.py                    # Evaluation script
+│   ├── predict.py                     # Prediction script
+│   └── benchmark.py                   # Benchmarking script
+│
+├── docs/
+│   ├── api/                           # API documentation
+│   ├── tutorials/                     # Tutorial documentation
+│   ├── examples/                      # Example documentation
+│   └── architecture.md                # Architecture documentation
+│
+└── docker/
+    ├── Dockerfile                     # Docker container
+    ├── docker-compose.yml             # Docker compose
+    └── requirements-docker.txt        # Docker-specific requirements

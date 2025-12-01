@@ -55,7 +55,15 @@ class BaselineGPT(nn.Module):
         pos_emb = self.pos_emb(torch.arange(T, device=idx.device))
         x = tok_emb + pos_emb
         
-        x = self.blocks(x)
+        x = tok_emb + pos_emb
+        
+        # Create causal mask
+        mask = torch.triu(torch.ones(T, T, device=idx.device) * float('-inf'), diagonal=1)
+        
+        # Pass through blocks with mask
+        for block in self.blocks:
+            x = block(x, src_mask=mask)
+            
         x = self.ln_f(x)
         logits = self.lm_head(x)
         
@@ -86,8 +94,8 @@ class WikiTextDataset(Dataset):
                 truncation=True
             )
             
-            # Create overlapping windows
-            for i in range(0, len(tokens) - block_size, block_size // 2):
+            # Use non-overlapping windows to prevent data leakage
+            for i in range(0, len(tokens) - block_size, block_size):
                 chunk = tokens[i:i + block_size + 1]
                 if len(chunk) == block_size + 1:
                     self.examples.append(chunk)
@@ -152,7 +160,7 @@ def main():
         'n_embd': 256,
         'n_head': 8,
         'n_layer': 6,
-        'block_size': 256,
+        'block_size': 128,  # FIXED: Match Kolosis for fair comparison
         'dropout': 0.1,
         'batch_size': 32,
         'epochs': 10,
