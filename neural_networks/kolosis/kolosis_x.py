@@ -152,6 +152,7 @@ class KolosisX(nn.Module):
         self.vocab_size = vocab_size
         self.block_size = block_size
         self.n_embd = n_embd
+        self.dropout_rate = dropout
         
         # 1. Shared Components
         self.token_emb = nn.Embedding(vocab_size, n_embd)
@@ -299,14 +300,18 @@ class KolosisX(nn.Module):
 
     def add_stream(self, new_stream_class, **kwargs):
         """Dynamic stream addition"""
+        device = next(self.parameters()).device
         new_stream = new_stream_class(self.n_embd, **kwargs)
-        self.streams.append(new_stream)
-        self.stream_heads.append(nn.Linear(self.n_embd, self.vocab_size))
+        self.streams.append(new_stream.to(device))
+        
+        new_head = nn.Linear(self.n_embd, self.vocab_size).to(device)
+        self._init_weights(new_head)
+        self.stream_heads.append(new_head)
         
         # Re-initialize router with new dimension
         # In a real scenario, we'd want to expand it without losing weights
         # For now, we'll just re-init
-        self.router = MetaFusionRouter(len(self.streams), self.n_embd)
+        self.router = MetaFusionRouter(len(self.streams), self.n_embd, self.dropout_rate).to(device)
         
         return new_stream
 

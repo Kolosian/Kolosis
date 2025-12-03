@@ -92,7 +92,7 @@ def evaluate(model, val_loader, device):
     with torch.no_grad():
         for x, y in tqdm(val_loader, desc="Evaluating"):
             x, y = x.to(device), y.to(device)
-            _, loss, _ = model(x, y)
+            _, loss, _ = model(x, y, return_stream_outputs=True)
             total_loss += loss.item()
     
     avg_loss = total_loss / len(val_loader)

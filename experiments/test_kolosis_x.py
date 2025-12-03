@@ -60,7 +60,7 @@ def test_kolosis_x():
     
     class CausalStream(UnsupervisedStream):
         def unsupervised_loss(self, features, **kwargs):
-            return torch.tensor(0.1) # Dummy loss
+            return torch.tensor(0.1, device=features.device)  # Dummy loss on correct device
             
     new_stream = model.add_stream(CausalStream)
     print(f"✅ Added CausalStream. Total streams: {len(model.streams)}")
