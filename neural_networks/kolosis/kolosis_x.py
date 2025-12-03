@@ -124,8 +124,10 @@ class MetaFusionRouter(nn.Module):
         )
         
     def forward(self, stream_features, context_features):
-        # Encode context
-        ctx = self.context_encoder(context_features)
+        # Encode context (with causal mask to prevent leakage)
+        B, T, C = context_features.shape
+        mask = torch.triu(torch.ones(T, T, device=context_features.device) * float('-inf'), diagonal=1)
+        ctx = self.context_encoder(context_features, src_mask=mask)
         
         # Route per-token
         weights = self.router(ctx) # (B, T, n_streams)
