@@ -36,15 +36,18 @@ class TemporalStream(UnsupervisedStream):
         self.position_predictor = nn.Linear(n_embd, 1)
         self.block_size = block_size
         
-    def unsupervised_loss(self, features, positions=None):
-        if positions is None:
-            return torch.tensor(0.0, device=features.device)
-            
-        # Predict relative position in sequence
-        pred_pos = self.position_predictor(features).squeeze(-1)
+    def unsupervised_loss(self, features, positions):
+        # Predict position from temporal features
+        B, T, C = features.shape
         
-        # Normalize positions to [0, 1]
-        target_pos = positions.float() / self.block_size
+        # Normalize positions to [0, 1] - handle edge case where block_size == 1
+        if self.block_size == 1:
+            target_pos = torch.zeros_like(positions, dtype=torch.float)
+        else:
+            target_pos = positions.float() / (self.block_size - 1)
+        
+        # Predict positions
+        pred_pos = self.position_predictor(features).squeeze(-1)
         
         return F.mse_loss(pred_pos, target_pos)
 
@@ -54,10 +57,10 @@ class SemanticStream(UnsupervisedStream):
         super().__init__(n_embd, dropout)
         self.projector = nn.Linear(n_embd, 128) # Low-dim projection
         
-    def unsupervised_loss(self, features, **kwargs):
+    def unsupervised_loss(self, features):
         # SimCLR-style contrastive loss within batch
         # Treat adjacent tokens as positive pairs (simplified)
-        B, T, C = features.shape
+        B, T, _ = features.shape
         if T < 2:
             return torch.tensor(0.0, device=features.device)
         
@@ -128,7 +131,7 @@ class MetaFusionRouter(nn.Module):
         
     def forward(self, stream_features, context_features):
         # Encode context (with causal mask to prevent leakage)
-        B, T, C = context_features.shape
+        _, T, _ = context_features.shape
         mask = torch.triu(torch.ones(T, T, device=context_features.device) * float('-inf'), diagonal=1)
         ctx = self.context_encoder(context_features, src_mask=mask)
         
@@ -208,6 +211,9 @@ class KolosisX(nn.Module):
 
     def forward(self, idx, targets=None, return_stream_outputs=False, include_diversity_loss=True):
         B, T = idx.shape
+        
+        # Validate sequence length
+        assert T <= self.block_size, f"Sequence length {T} exceeds block_size {self.block_size}"
         
         # 1. Shared Embeddings
         tok_emb = self.token_emb(idx)
@@ -291,8 +297,8 @@ class KolosisX(nn.Module):
         for i in range(len(stream_features)):
             for j in range(i+1, len(stream_features)):
                 # Flatten batch and time
-                f1 = stream_features[i].view(-1, self.n_embd)
-                f2 = stream_features[j].view(-1, self.n_embd)
+                f1 = stream_features[i].reshape(-1, self.n_embd)
+                f2 = stream_features[j].reshape(-1, self.n_embd)
                 
                 # Cosine similarity
                 sim = F.cosine_similarity(f1, f2, dim=-1).mean()
@@ -304,8 +310,23 @@ class KolosisX(nn.Module):
         return torch.tensor(0.0, device=stream_features[0].device)
 
     def add_stream(self, new_stream_class, **kwargs):
-        """Dynamic stream addition"""
+        """Dynamic stream addition.
+        
+        Note: After calling this, you MUST recreate or extend your optimizer
+        to include parameters from the new stream and head.
+        
+        Args:
+            new_stream_class: Class inheriting from UnsupervisedStream
+            **kwargs: Additional args for stream (defaults: block_size, dropout from model)
+        """
         device = next(self.parameters()).device
+        
+        # Provide sensible defaults
+        if 'block_size' not in kwargs:
+            kwargs['block_size'] = self.block_size
+        if 'dropout' not in kwargs:
+            kwargs['dropout'] = self.dropout_rate
+            
         new_stream = new_stream_class(self.n_embd, **kwargs)
         self.streams.append(new_stream.to(device))
         
@@ -314,8 +335,7 @@ class KolosisX(nn.Module):
         self.stream_heads.append(new_head)
         
         # Re-initialize router with new dimension
-        # In a real scenario, we'd want to expand it without losing weights
-        # For now, we'll just re-init
+        # WARNING: This discards learned router weights
         self.router = MetaFusionRouter(len(self.streams), self.n_embd, self.dropout_rate).to(device)
         
         return new_stream
