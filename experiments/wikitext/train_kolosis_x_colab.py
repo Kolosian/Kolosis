@@ -99,13 +99,11 @@ class ConceptStream(UnsupervisedStream):
         self.norm = nn.LayerNorm(n_embd)
         self.encoder = nn.Linear(n_embd, n_embd // 4)
         self.decoder = nn.Linear(n_embd // 4, n_embd)
-        
     def forward(self, x):
         encoded = self.encoder(self.norm(x))
         decoded = self.decoder(F.gelu(encoded))
         self._last_decoded = decoded
         return x + decoded
-        
     def unsupervised_loss(self, features, original_input=None):
         if original_input is None:
             return torch.tensor(0.0, device=features.device)
@@ -115,6 +113,29 @@ class ConceptStream(UnsupervisedStream):
             encoded = self.encoder(self.norm(original_input))
             decoded = self.decoder(F.gelu(encoded))
         return F.mse_loss(decoded, original_input)
+
+class CausalStream(UnsupervisedStream):
+    def __init__(self, n_embd, dropout=0.1):
+        super().__init__(n_embd, dropout)
+        self.causal_predictor = nn.Sequential(
+            nn.Linear(n_embd * 2, n_embd),
+            nn.GELU(),
+            nn.Linear(n_embd, 1),
+            nn.Sigmoid()
+        )
+    def forward(self, x):
+        return x  # No transformation, just pass through
+    def unsupervised_loss(self, features):
+        B, T, _ = features.shape
+        if T < 2:
+            return torch.tensor(0.0, device=features.device)
+        current = features[:, :-1, :]
+        next_tok = features[:, 1:, :]
+        pairs = torch.cat([current, next_tok], dim=-1)
+        pred = self.causal_predictor(pairs).squeeze(-1)
+        target = torch.ones_like(pred)
+        return F.binary_cross_entropy(pred, target)
+
 
 class MetaFusionRouter(nn.Module):
     def __init__(self, n_streams, n_embd, dropout=0.1):
@@ -161,10 +182,11 @@ class KolosisX(nn.Module):
         self.temporal_stream = TemporalStream(n_embd, block_size, dropout)
         self.semantic_stream = SemanticStream(n_embd, dropout)
         self.concept_stream = ConceptStream(n_embd, dropout)
-        self.streams = nn.ModuleList([self.temporal_stream, self.semantic_stream, self.concept_stream])
+        self.causal_stream = CausalStream(n_embd, dropout)
+        self.streams = nn.ModuleList([self.temporal_stream, self.semantic_stream, self.concept_stream, self.causal_stream])
         
-        self.stream_heads = nn.ModuleList([nn.Linear(n_embd, vocab_size) for _ in range(3)])
-        self.router = MetaFusionRouter(3, n_embd, dropout)
+        self.stream_heads = nn.ModuleList([nn.Linear(n_embd, vocab_size) for _ in range(4)])
+        self.router = MetaFusionRouter(4, n_embd, dropout)
         self.final_head = nn.Linear(n_embd, vocab_size)
         
         self.apply(self._init_weights)
@@ -210,7 +232,8 @@ class KolosisX(nn.Module):
                 unsup_losses = [
                     self.temporal_stream.unsupervised_loss(stream_outputs[0], positions=positions),
                     self.semantic_stream.unsupervised_loss(stream_outputs[1]),
-                    self.concept_stream.unsupervised_loss(stream_outputs[2], original_input=backbone_features)
+                    self.concept_stream.unsupervised_loss(stream_outputs[2], original_input=backbone_features),
+                    self.causal_stream.unsupervised_loss(stream_outputs[3])
                 ]
                 
                 diversity = torch.tensor(0.0, device=idx.device)
@@ -367,7 +390,7 @@ def get_model_stats(model, device, sample_batch):
         _, _, info = model(x, y, return_stream_outputs=True)
     
     weights = info['gate_weights'].mean(dim=[0, 1]).cpu().tolist()
-    stream_names = ['temporal', 'semantic', 'concept']
+    stream_names = ['temporal', 'semantic', 'concept', 'causal']
     fusion_stats = {name: weights[i] for i, name in enumerate(stream_names) if i < len(weights)}
     
     return fusion_stats
@@ -465,6 +488,7 @@ def main():
         print(f"  Temporal: {fusion_stats['temporal']:.4f} ({fusion_stats['temporal']*100:.1f}%)")
         print(f"  Semantic: {fusion_stats['semantic']:.4f} ({fusion_stats['semantic']*100:.1f}%)")
         print(f"  Concept:  {fusion_stats['concept']:.4f} ({fusion_stats['concept']*100:.1f}%)")
+        print(f"  Causal:   {fusion_stats['causal']:.4f} ({fusion_stats['causal']*100:.1f}%)")
         
         if val_loss < best_val_loss:
             best_val_loss = val_loss
