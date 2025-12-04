@@ -69,15 +69,29 @@ class SemanticStream(UnsupervisedStream):
         return self.dropout(x)
         
     def unsupervised_loss(self, features):
+        # SimCLR-style contrastive loss within batch
+        # Treat adjacent tokens as positive pairs (simplified)
         B, T, _ = features.shape
         if T < 2:
             return torch.tensor(0.0, device=features.device)
+        
         proj = self.projector(features)
         proj = F.normalize(proj, dim=-1)
-        sim = torch.bmm(proj, proj.transpose(1, 2))
-        labels = torch.arange(1, T, device=features.device).unsqueeze(0).expand(B, -1)
-        loss = F.cross_entropy(sim[:, :-1, :], labels, reduction='mean')
-        return loss
+        
+        # Cosine similarity matrix
+        sim = torch.matmul(proj, proj.transpose(-1, -2))
+        
+        # Positive pairs: (t, t+1)
+        # Create labels for adjacent tokens
+        labels = torch.arange(T, device=features.device)
+        # Shifted targets (t -> t+1)
+        targets = torch.roll(labels, -1)
+        targets[-1] = -100  # Ignore last (standard PyTorch ignore_index)
+        
+        # This is a simplified proxy for semantic clustering
+        # Real implementation would need augmentation or external pairs
+        # For now, we encourage temporal smoothness in semantic space
+        return F.cross_entropy(sim.view(-1, T), targets.repeat(B))
 
 class ConceptStream(UnsupervisedStream):
     def __init__(self, n_embd, dropout=0.1):
