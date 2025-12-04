@@ -90,19 +90,20 @@ class ConceptStream(UnsupervisedStream):
         # Bottleneck forward pass
         encoded = self.encoder(self.norm(x))
         decoded = self.decoder(F.gelu(encoded))
+        self._last_decoded = decoded  # Cache for loss computation
         return x + decoded
         
     def unsupervised_loss(self, features, original_input=None):
         if original_input is None:
             return torch.tensor(0.0, device=features.device)
         
-        # Reconstruct original input features
-        # Note: 'features' here is the output of forward(), which is x + decoded
-        # We want to minimize reconstruction error of the bottleneck
-        
-        # Re-run bottleneck for loss calculation (inefficient but clear)
-        encoded = self.encoder(self.norm(original_input))
-        decoded = self.decoder(F.gelu(encoded))
+        # Use cached decoded output to avoid recomputation
+        if not hasattr(self, '_last_decoded'):
+            # Fallback if cache unavailable (e.g., eval mode without forward call)
+            encoded = self.encoder(self.norm(original_input))
+            decoded = self.decoder(F.gelu(encoded))
+        else:
+            decoded = self._last_decoded
         
         return F.mse_loss(decoded, original_input)
 
