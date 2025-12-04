@@ -115,8 +115,10 @@ class ConceptStream(UnsupervisedStream):
         return F.mse_loss(decoded, original_input)
 
 class CausalStream(UnsupervisedStream):
+    """Learns causal relationships between tokens"""
     def __init__(self, n_embd, dropout=0.1):
         super().__init__(n_embd, dropout)
+        # Predict if token i causes token j (binary classification)
         self.causal_predictor = nn.Sequential(
             nn.Linear(n_embd * 2, n_embd),
             nn.GELU(),
@@ -126,7 +128,7 @@ class CausalStream(UnsupervisedStream):
     def forward(self, x):
         return x  # No transformation, just pass through
     def unsupervised_loss(self, features):
-        B, T, _ = features.shape
+        _, T, _ = features.shape
         if T < 2:
             return torch.tensor(0.0, device=features.device)
         current = features[:, :-1, :]
@@ -183,10 +185,16 @@ class KolosisX(nn.Module):
         self.semantic_stream = SemanticStream(n_embd, dropout)
         self.concept_stream = ConceptStream(n_embd, dropout)
         self.causal_stream = CausalStream(n_embd, dropout)
-        self.streams = nn.ModuleList([self.temporal_stream, self.semantic_stream, self.concept_stream, self.causal_stream])
         
-        self.stream_heads = nn.ModuleList([nn.Linear(n_embd, vocab_size) for _ in range(4)])
-        self.router = MetaFusionRouter(4, n_embd, dropout)
+        self.streams = nn.ModuleList([
+            self.temporal_stream,
+            self.semantic_stream,
+            self.concept_stream,
+            self.causal_stream
+        ])
+        
+        self.stream_heads = nn.ModuleList([nn.Linear(n_embd, vocab_size) for _ in self.streams])
+        self.router = MetaFusionRouter(len(self.streams), n_embd, dropout)
         self.final_head = nn.Linear(n_embd, vocab_size)
         
         self.apply(self._init_weights)
@@ -240,15 +248,22 @@ class KolosisX(nn.Module):
                 if include_diversity_loss:
                     diversity = self.compute_diversity_loss(stream_outputs)
                 
+                # Router entropy loss - penalize collapse to single stream
+                router_entropy = -(gate_weights * torch.log(gate_weights + 1e-8)).sum(dim=-1).mean()
+                max_entropy = torch.log(torch.tensor(float(len(self.streams)), device=idx.device))
+                entropy_loss = -0.1 * (router_entropy / max_entropy)  # Encourage high entropy
+                
                 avg_aux = sum(aux_losses) / len(aux_losses)
                 avg_unsup = sum(unsup_losses) / len(unsup_losses)
                 
-                loss = (0.4 * main_loss + 0.3 * avg_aux + 0.2 * avg_unsup + 0.1 * diversity)
+                # Increased diversity weight (0.1 -> 0.2) to prevent stream collapse
+                loss = (0.35 * main_loss + 0.25 * avg_aux + 0.15 * avg_unsup + 0.2 * diversity + 0.05 * (-entropy_loss))
                 
                 info['main_loss'] = main_loss.item()
                 info['aux_loss'] = avg_aux.item()
                 info['unsup_loss'] = avg_unsup.item()
                 info['diversity_loss'] = diversity.item()
+                info['router_entropy'] = router_entropy.item()
 
             if return_stream_outputs:
                 info['gate_weights'] = gate_weights
