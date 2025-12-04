@@ -12,6 +12,7 @@ import time
 import json
 import os
 from tqdm import tqdm
+from experiments.wikitext.dataset import WikiTextDataset
 
 class BaselineGPT(nn.Module):
     """Standard GPT for WikiText-103"""
@@ -55,8 +56,6 @@ class BaselineGPT(nn.Module):
         pos_emb = self.pos_emb(torch.arange(T, device=idx.device))
         x = tok_emb + pos_emb
         
-        x = tok_emb + pos_emb
-        
         # Create causal mask
         mask = torch.triu(torch.ones(T, T, device=idx.device) * float('-inf'), diagonal=1)
         
@@ -72,44 +71,6 @@ class BaselineGPT(nn.Module):
             loss = F.cross_entropy(logits.view(B*T, -1), targets.view(B*T))
             
         return logits, loss
-
-class WikiTextDataset(Dataset):
-    """WikiText-103 dataset with tokenization"""
-    
-    def __init__(self, texts, tokenizer, block_size=256):
-        self.tokenizer = tokenizer
-        self.block_size = block_size
-        self.examples = []
-        
-        print(f"Tokenizing {len(texts)} documents...")
-        for text in tqdm(texts):
-            if len(text.strip()) == 0:
-                continue
-            
-            # Tokenize with truncation to avoid exceeding max length
-            tokens = tokenizer.encode(
-                text, 
-                add_special_tokens=False,
-                max_length=2048,  # Safe limit
-                truncation=True
-            )
-            
-            # Use non-overlapping windows to prevent data leakage
-            for i in range(0, len(tokens) - block_size, block_size):
-                chunk = tokens[i:i + block_size + 1]
-                if len(chunk) == block_size + 1:
-                    self.examples.append(chunk)
-        
-        print(f"Created {len(self.examples)} training examples")
-    
-    def __len__(self):
-        return len(self.examples)
-    
-    def __getitem__(self, idx):
-        chunk = self.examples[idx]
-        x = torch.tensor(chunk[:-1], dtype=torch.long)
-        y = torch.tensor(chunk[1:], dtype=torch.long)
-        return x, y
 
 def train_epoch(model, train_loader, optimizer, device, epoch):
     """Train for one epoch"""

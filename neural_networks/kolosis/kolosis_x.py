@@ -58,7 +58,8 @@ class SemanticStream(UnsupervisedStream):
         # SimCLR-style contrastive loss within batch
         # Treat adjacent tokens as positive pairs (simplified)
         B, T, C = features.shape
-        if T < 2: return torch.tensor(0.0, device=features.device)
+        if T < 2:
+            return torch.tensor(0.0, device=features.device)
         
         proj = self.projector(features)
         proj = F.normalize(proj, dim=-1)
@@ -92,7 +93,8 @@ class ConceptStream(UnsupervisedStream):
         return x + decoded
         
     def unsupervised_loss(self, features, original_input=None):
-        if original_input is None: return torch.tensor(0.0, device=features.device)
+        if original_input is None:
+            return torch.tensor(0.0, device=features.device)
         
         # Reconstruct original input features
         # Note: 'features' here is the output of forward(), which is x + decoded
@@ -234,7 +236,7 @@ class KolosisX(nn.Module):
         
         if targets is not None or return_stream_outputs:
             # Calculate stream logits
-            stream_logits = [head(feat) for head, feat in zip(self.stream_heads, stream_outputs)]
+            stream_logits = [head(feat) for head, feat in zip(self.stream_heads, stream_outputs, strict=True)]
             
             if targets is not None:
                 # Main Task Loss
@@ -282,10 +284,7 @@ class KolosisX(nn.Module):
         return logits, loss, info
 
     def compute_diversity_loss(self, stream_features):
-        """Encourage streams to be different (minimize cosine similarity)"""
-        # This method is now deprecated as its logic has been moved into forward()
-        # It's kept for backward compatibility if any external code still calls it,
-        # but its functionality is now integrated directly into the forward pass.
+        """Encourage streams to be different (minimize cosine similarity)."""
         loss = 0.0
         n_pairs = 0
         for i in range(len(stream_features)):

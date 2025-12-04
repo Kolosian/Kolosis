@@ -15,35 +15,7 @@ from tqdm import tqdm
 
 from neural_networks.kolosis.kolosis_x import KolosisX
 
-class WikiTextDataset(Dataset):
-    def __init__(self, texts, tokenizer, block_size=128):
-        self.tokenizer = tokenizer
-        self.block_size = block_size
-        self.examples = []
-        
-        print(f"Tokenizing {len(texts)} documents...")
-        for text in tqdm(texts):
-            if len(text.strip()) == 0:
-                continue
-            
-            tokens = tokenizer.encode(text, add_special_tokens=False, max_length=2048, truncation=True)
-            
-            # Non-overlapping windows
-            for i in range(0, len(tokens) - block_size, block_size):
-                chunk = tokens[i:i + block_size + 1]
-                if len(chunk) == block_size + 1:
-                    self.examples.append(chunk)
-        
-        print(f"Created {len(self.examples)} training examples")
-    
-    def __len__(self):
-        return len(self.examples)
-    
-    def __getitem__(self, idx):
-        chunk = self.examples[idx]
-        x = torch.tensor(chunk[:-1], dtype=torch.long)
-        y = torch.tensor(chunk[1:], dtype=torch.long)
-        return x, y
+from experiments.wikitext.dataset import WikiTextDataset
 
 def compute_router_entropy(info):
     """Compute average router entropy from gate weights"""
@@ -92,7 +64,7 @@ def train_epoch(model, train_loader, optimizer, device, epoch):
         
         # Check for dead streams (simple heuristic: check stream heads)
         dead_streams = []
-        for i, head in enumerate(model.stream_heads):
+        for i, _head in enumerate(model.stream_heads):
             head_norm = grad_norms.get(f'stream_heads.{i}.weight', 1.0)
             if head_norm < 1e-6:
                 dead_streams.append(i)
@@ -143,11 +115,8 @@ def get_model_stats(model, device, sample_batch):
     
     # Fusion weights (meta-router)
     weights = info['gate_weights'].mean(dim=[0, 1]).cpu().tolist()
-    fusion_stats = {
-        'temporal': weights[0],
-        'semantic': weights[1],
-        'concept': weights[2]
-    }
+    stream_names = ['temporal', 'semantic', 'concept']
+    fusion_stats = {name: weights[i] for i, name in enumerate(stream_names) if i < len(weights)}
     
     return fusion_stats
 

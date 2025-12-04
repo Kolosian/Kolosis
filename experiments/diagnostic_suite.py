@@ -162,8 +162,11 @@ def check_router_entropy(model, dataloader, device, steps=20):
     
     return entropy_history
 
-def check_reproducibility(model_class, config, dataloader, device, seeds=[42, 123, 456]):
+def check_reproducibility(model_class, config, dataloader, device, seeds=None):
     """Test reproducibility across random seeds"""
+    if seeds is None:
+        seeds = [42, 123, 456]
+    
     print(f"\n{'='*60}")
     print(f"REPRODUCIBILITY CHECK")
     print(f"{'='*60}")
@@ -225,7 +228,7 @@ def ablation_study(model_class, config, dataloader, device, epochs=2):
     
     print("\nTraining WITH diversity loss...")
     losses_with = []
-    for epoch in range(epochs):
+    for _epoch in range(epochs):
         for step, (x, y) in enumerate(dataloader):
             if step >= 20:
                 break
@@ -243,7 +246,7 @@ def ablation_study(model_class, config, dataloader, device, epochs=2):
     
     print("Training WITHOUT diversity loss...")
     losses_without = []
-    for epoch in range(epochs):
+    for _epoch in range(epochs):
         for step, (x, y) in enumerate(dataloader):
             if step >= 20:
                 break
