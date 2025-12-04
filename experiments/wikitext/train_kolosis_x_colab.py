@@ -71,7 +71,7 @@ class SemanticStream(UnsupervisedStream):
     def unsupervised_loss(self, features):
         # SimCLR-style contrastive loss within batch
         # Treat adjacent tokens as positive pairs (simplified)
-        _, T, _ = features.shape
+        B, T, _ = features.shape
         if T < 2:
             return torch.tensor(0.0, device=features.device)
         
@@ -193,8 +193,8 @@ class KolosisX(nn.Module):
             self.causal_stream
         ])
         
-        self.stream_heads = nn.ModuleList([nn.Linear(n_embd, vocab_size) for _ in range(4)])
-        self.router = MetaFusionRouter(4, n_embd, dropout)
+        self.stream_heads = nn.ModuleList([nn.Linear(n_embd, vocab_size) for _ in self.streams])
+        self.router = MetaFusionRouter(len(self.streams), n_embd, dropout)
         self.final_head = nn.Linear(n_embd, vocab_size)
         
         self.apply(self._init_weights)
