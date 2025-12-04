@@ -205,8 +205,11 @@ class KolosisS(nn.Module):
         logits = self.head(fused)
         
         loss = None
+        entropy_loss = None
         if targets is not None:
             loss = F.cross_entropy(logits.view(-1, self.vocab_size), targets.view(-1))
+            entropy_loss = self.fusion_gate.compute_entropy_loss(gate_weights)
+            loss = loss + entropy_loss
             
         return logits, loss
 
@@ -244,7 +247,7 @@ def train_epoch(model, loader, optimizer, device, epoch):
     for x, y in pbar:
         x, y = x.to(device), y.to(device)
         optimizer.zero_grad()
-        _, loss = model(x, y)
+        _, loss = model(x, y)  # loss now includes entropy regularization
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()

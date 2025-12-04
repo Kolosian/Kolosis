@@ -149,6 +149,7 @@ class CausalStream(UnsupervisedStream):
         # Binary cross-entropy loss
         return F.binary_cross_entropy(pred, target)
 
+
 class MetaFusionRouter(nn.Module):
     """Learns to route tokens to streams based on context"""
     def __init__(self, n_streams, n_embd, dropout=0.1):
@@ -219,16 +220,20 @@ class KolosisX(nn.Module):
         self.temporal_stream = TemporalStream(n_embd, block_size, dropout)
         self.semantic_stream = SemanticStream(n_embd, dropout)
         self.concept_stream = ConceptStream(n_embd, dropout)
-        self.causal_stream = CausalStream(n_embd, dropout)
-        self.streams = nn.ModuleList([self.temporal_stream, self.semantic_stream, self.concept_stream, self.causal_stream])
+        
+        self.streams = nn.ModuleList([
+            self.temporal_stream,
+            self.semantic_stream,
+            self.concept_stream
+        ])
         
         # 3. Meta-Router
-        self.router = MetaFusionRouter(4, n_embd, dropout)
+        self.router = MetaFusionRouter(len(self.streams), n_embd, dropout)
         
         # 4. Task-Specific Heads (for auxiliary supervision)
         # In Kolosis-X, we allow streams to have their own heads to specialize
         self.stream_heads = nn.ModuleList([
-            nn.Linear(n_embd, vocab_size) for _ in range(4)
+            nn.Linear(n_embd, vocab_size) for _ in self.streams
         ])
         
         # 5. Final Prediction Head
@@ -298,8 +303,6 @@ class KolosisX(nn.Module):
                 unsup_losses.append(self.semantic_stream.unsupervised_loss(stream_outputs[1]))
                 # Concept: reconstruction
                 unsup_losses.append(self.concept_stream.unsupervised_loss(stream_outputs[2], original_input=backbone_features))
-                # Causal: binary causality
-                unsup_losses.append(self.causal_stream.unsupervised_loss(stream_outputs[3]))
                 
                 # Diversity Loss
                 diversity = torch.tensor(0.0, device=idx.device)

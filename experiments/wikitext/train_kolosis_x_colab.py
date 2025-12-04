@@ -71,7 +71,7 @@ class SemanticStream(UnsupervisedStream):
     def unsupervised_loss(self, features):
         # SimCLR-style contrastive loss within batch
         # Treat adjacent tokens as positive pairs (simplified)
-        B, T, _ = features.shape
+        _, T, _ = features.shape
         if T < 2:
             return torch.tensor(0.0, device=features.device)
         
@@ -115,8 +115,10 @@ class ConceptStream(UnsupervisedStream):
         return F.mse_loss(decoded, original_input)
 
 class CausalStream(UnsupervisedStream):
+    """Learns causal relationships between tokens"""
     def __init__(self, n_embd, dropout=0.1):
         super().__init__(n_embd, dropout)
+        # Predict if token i causes token j (binary classification)
         self.causal_predictor = nn.Sequential(
             nn.Linear(n_embd * 2, n_embd),
             nn.GELU(),
@@ -126,7 +128,7 @@ class CausalStream(UnsupervisedStream):
     def forward(self, x):
         return x  # No transformation, just pass through
     def unsupervised_loss(self, features):
-        B, T, _ = features.shape
+        _, T, _ = features.shape
         if T < 2:
             return torch.tensor(0.0, device=features.device)
         current = features[:, :-1, :]
@@ -183,7 +185,13 @@ class KolosisX(nn.Module):
         self.semantic_stream = SemanticStream(n_embd, dropout)
         self.concept_stream = ConceptStream(n_embd, dropout)
         self.causal_stream = CausalStream(n_embd, dropout)
-        self.streams = nn.ModuleList([self.temporal_stream, self.semantic_stream, self.concept_stream, self.causal_stream])
+        
+        self.streams = nn.ModuleList([
+            self.temporal_stream,
+            self.semantic_stream,
+            self.concept_stream,
+            self.causal_stream
+        ])
         
         self.stream_heads = nn.ModuleList([nn.Linear(n_embd, vocab_size) for _ in range(4)])
         self.router = MetaFusionRouter(4, n_embd, dropout)
