@@ -249,17 +249,10 @@ def ablation_study(model_class, config, dataloader, device, epochs=2):
                 break
             x, y = x.to(device), y.to(device)
             optimizer.zero_grad()
-            _, loss, info = model_without(x, y, return_stream_outputs=True)
-            # Manually remove diversity component
-            loss_no_div = (
-                0.4 * info['main_loss'] +
-                0.3 * info['aux_loss'] +
-                0.2 * info['unsup_loss']
-            ) / 0.9  # Renormalize
-            loss_no_div = torch.tensor(loss_no_div, requires_grad=True)
-            loss_no_div.backward()
+            _, loss, info = model_without(x, y, return_stream_outputs=True, include_diversity_loss=False)
+            loss.backward()
             optimizer.step()
-            losses_without.append(loss_no_div.item())
+            losses_without.append(loss.item())
     
     print(f"\nFinal loss WITH diversity:    {np.mean(losses_with[-5:]):.4f}")
     print(f"Final loss WITHOUT diversity: {np.mean(losses_without[-5:]):.4f}")

@@ -45,6 +45,23 @@ class WikiTextDataset(Dataset):
         y = torch.tensor(chunk[1:], dtype=torch.long)
         return x, y
 
+def compute_router_entropy(info):
+    """Compute average router entropy from gate weights"""
+    if 'gate_weights' not in info:
+        return 0.0
+    weights = info['gate_weights']  # (B, T, n_streams)
+    # Entropy per token: -sum(p * log(p))
+    entropy = -(weights * torch.log(weights + 1e-8)).sum(dim=-1)
+    return entropy.mean().item()
+
+def check_gradient_norms(model):
+    """Check for dead streams (grad norm < 1e-6)"""
+    norms = {}
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            norms[name] = param.grad.norm().item()
+    return norms
+
 def train_epoch(model, train_loader, optimizer, device, epoch):
     model.train()
     total_loss = 0
@@ -69,12 +86,27 @@ def train_epoch(model, train_loader, optimizer, device, epoch):
         total_unsup += info['unsup_loss']
         total_div += info['diversity_loss']
         
+        # Monitoring
+        entropy = compute_router_entropy(info)
+        grad_norms = check_gradient_norms(model)
+        
+        # Check for dead streams (simple heuristic: check stream heads)
+        dead_streams = []
+        for i, head in enumerate(model.stream_heads):
+            head_norm = grad_norms.get(f'stream_heads.{i}.weight', 1.0)
+            if head_norm < 1e-6:
+                dead_streams.append(i)
+        
         if batch_idx % 100 == 0:
-            pbar.set_postfix({
+            status = {
                 'loss': f'{loss.item():.4f}',
                 'main': f'{info["main_loss"]:.4f}',
-                'div': f'{info["diversity_loss"]:.4f}'
-            })
+                'div': f'{info["diversity_loss"]:.4f}',
+                'ent': f'{entropy:.4f}'
+            }
+            if dead_streams:
+                status['DEAD'] = str(dead_streams)
+            pbar.set_postfix(status)
     
     n = len(train_loader)
     return {
@@ -126,9 +158,9 @@ def main():
     
     config = {
         'vocab_size': 50257,
-        'n_embd': 128,
+        'n_embd': 384,
         'block_size': 128,
-        'n_layer': 2,      # Shared backbone layers
+        'n_layer': 6,      # Shared backbone layers
         'dropout': 0.1,
         'batch_size': 32,
         'epochs': 10,

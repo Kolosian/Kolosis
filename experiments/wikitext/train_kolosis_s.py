@@ -111,9 +111,9 @@ def main():
     
     config = {
         'vocab_size': 50257,
-        'n_embd': 128,
+        'n_embd': 384,
         'block_size': 128,
-        'n_layer': 2,      # Shared backbone layers
+        'n_layer': 6,      # Shared backbone layers
         'dropout': 0.1,
         'batch_size': 32,  # Optimized model allows larger batch size!
         'epochs': 10,

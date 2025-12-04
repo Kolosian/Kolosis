@@ -203,7 +203,7 @@ class KolosisX(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None, return_stream_outputs=False):
+    def forward(self, idx, targets=None, return_stream_outputs=False, include_diversity_loss=True):
         B, T = idx.shape
         
         # 1. Shared Embeddings
@@ -256,7 +256,9 @@ class KolosisX(nn.Module):
                 unsup_losses.append(self.concept_stream.unsupervised_loss(stream_outputs[2], original_input=backbone_features))
                 
                 # Diversity Loss
-                diversity = self.compute_diversity_loss(stream_outputs)
+                diversity = torch.tensor(0.0, device=idx.device)
+                if include_diversity_loss:
+                    diversity = self.compute_diversity_loss(stream_outputs)
                 
                 # Total Loss
                 # 0.4 Main + 0.3 Aux + 0.2 Unsup + 0.1 Diversity
@@ -281,6 +283,9 @@ class KolosisX(nn.Module):
 
     def compute_diversity_loss(self, stream_features):
         """Encourage streams to be different (minimize cosine similarity)"""
+        # This method is now deprecated as its logic has been moved into forward()
+        # It's kept for backward compatibility if any external code still calls it,
+        # but its functionality is now integrated directly into the forward pass.
         loss = 0.0
         n_pairs = 0
         for i in range(len(stream_features)):

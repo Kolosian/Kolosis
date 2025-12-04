@@ -157,7 +157,7 @@ def main():
     # Configuration
     config = {
         'vocab_size': 50257,  # GPT-2 tokenizer
-        'n_embd': 256,
+        'n_embd': 384,
         'n_head': 8,
         'n_layer': 6,
         'block_size': 128,  # FIXED: Match Kolosis for fair comparison
