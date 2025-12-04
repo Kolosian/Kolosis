@@ -248,15 +248,22 @@ class KolosisX(nn.Module):
                 if include_diversity_loss:
                     diversity = self.compute_diversity_loss(stream_outputs)
                 
+                # Router entropy loss - penalize collapse to single stream
+                router_entropy = -(gate_weights * torch.log(gate_weights + 1e-8)).sum(dim=-1).mean()
+                max_entropy = torch.log(torch.tensor(float(len(self.streams)), device=idx.device))
+                entropy_loss = -0.1 * (router_entropy / max_entropy)  # Encourage high entropy
+                
                 avg_aux = sum(aux_losses) / len(aux_losses)
                 avg_unsup = sum(unsup_losses) / len(unsup_losses)
                 
-                loss = (0.4 * main_loss + 0.3 * avg_aux + 0.2 * avg_unsup + 0.1 * diversity)
+                # Increased diversity weight (0.1 -> 0.2) to prevent stream collapse
+                loss = (0.35 * main_loss + 0.25 * avg_aux + 0.15 * avg_unsup + 0.2 * diversity + 0.05 * (-entropy_loss))
                 
                 info['main_loss'] = main_loss.item()
                 info['aux_loss'] = avg_aux.item()
                 info['unsup_loss'] = avg_unsup.item()
                 info['diversity_loss'] = diversity.item()
+                info['router_entropy'] = router_entropy.item()
 
             if return_stream_outputs:
                 info['gate_weights'] = gate_weights
