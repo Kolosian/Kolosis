@@ -143,34 +143,6 @@ class CausalStream(UnsupervisedStream):
 # ANTI-COLLAPSE HELPER FUNCTIONS
 # ============================================================================
 
-def normalize_stream_losses(stream_losses):
-    """FIX 1: Scale losses so each stream has similar gradient magnitude"""
-    if len(stream_losses) == 0:
-        return stream_losses
-    # Stack and compute std for normalization
-    stacked = torch.stack([l if l.dim() == 0 else l.mean() for l in stream_losses])
-    loss_std = stacked.std() + 1e-8
-    normalized = [l / loss_std for l in stream_losses]
-    return normalized
-
-
-def adaptive_entropy_weight(gate_weights, base_weight=0.35):
-    """FIX 2: Increase weight when streams become imbalanced"""
-    probs = gate_weights.mean(dim=[0, 1])  # [n_streams]
-    n_streams = probs.size(0)
-    uniform = 1.0 / n_streams
-    
-    # Imbalance score: max deviation from uniform
-    max_deviation = (probs - uniform).abs().max()
-    
-    # Scale up weight when imbalanced (0.0 = uniform, 1.0 = collapsed)
-    max_possible_dev = 1.0 - uniform
-    imbalance_ratio = (max_deviation / max_possible_dev).clamp(0, 1).item()
-    
-    # Linear scaling: base_weight → 1.0 as deviation increases
-    adaptive_weight = base_weight + (1.0 - base_weight) * imbalance_ratio
-    return adaptive_weight
-
 
 def scale_stream_gradients(stream_outputs, gate_weights):
     """FIX 3: Give under-utilized streams stronger gradients"""
@@ -211,22 +183,6 @@ def gumbel_softmax_st(logits, temperature=1.0, hard=False):
         y = y_soft
     
     return y
-
-
-def load_balancing_loss(gate_weights, num_streams):
-    """FIX 5: Encourage equal load across streams (from Switch Transformers)"""
-    # gate_weights: [B, T, n_streams]
-    
-    # Fraction of tokens routed to each stream
-    routing_probs = gate_weights.mean(dim=[0, 1])  # [n_streams]
-    
-    # Ideally each gets 1/n_streams
-    target = 1.0 / num_streams
-    
-    # Squared deviation from target
-    load_loss = ((routing_probs - target) ** 2).sum()
-    
-    return load_loss * num_streams  # Scale by n for consistent magnitude
 
 
 class MetaFusionRouter(nn.Module):
@@ -323,7 +279,7 @@ class KolosisX(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None, return_stream_outputs=False, include_diversity_loss=True, 
-                temperature=2.0, kl_weight=0.5, use_gumbel=True):
+                temperature=2.0, use_gumbel=True):
         B, T = idx.shape
         assert T <= self.block_size, f"Sequence length {T} exceeds block_size {self.block_size}"
         
@@ -408,8 +364,8 @@ class KolosisX(nn.Module):
                 avg_aux = sum(aux_losses) / len(aux_losses)
                 avg_unsup = sum(unsup_losses) / len(unsup_losses)
                 
-                # === FINAL LOSS: 97% Main Task, 3% Regularization ===
-                # This is the key change: almost all gradient goes to LM objective
+                # === FINAL LOSS: ~97% Main Task, ~3% Regularization ===
+                # Weights: 0.97 + 0.01 + 0.01 + 0.005 + 0.005 = 1.0
                 loss = (
                     0.97 * main_loss +           # Dominant: language modeling
                     0.01 * z_loss +              # Router stability (not uniformity)
@@ -500,14 +456,13 @@ def check_gradient_norms(model):
             norms[name] = param.grad.norm().item()
     return norms
 
-def train_epoch(model, train_loader, optimizer, router_optimizer, device, epoch, temperature=2.0, kl_weight=0.5):
+def train_epoch(model, train_loader, optimizer, router_optimizer, device, epoch, temperature=2.0):
     model.train()
     total_loss = 0
     total_main = 0
     total_aux = 0
     total_unsup = 0
     total_div = 0
-    total_kl = 0
     
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
     for batch_idx, (x, y) in enumerate(pbar):
@@ -517,7 +472,7 @@ def train_epoch(model, train_loader, optimizer, router_optimizer, device, epoch,
         optimizer.zero_grad()
         router_optimizer.zero_grad()
         
-        _, loss, info = model(x, y, return_stream_outputs=True, temperature=temperature, kl_weight=kl_weight)
+        _, loss, info = model(x, y, return_stream_outputs=True, temperature=temperature)
         loss.backward()
         
         # Clip gradients
@@ -532,7 +487,6 @@ def train_epoch(model, train_loader, optimizer, router_optimizer, device, epoch,
         total_aux += info['aux_loss']
         total_unsup += info['unsup_loss']
         total_div += info['diversity_loss']
-        total_kl += info.get('entropy_loss', 0)
         
         entropy = compute_router_entropy(info)
         grad_norms = check_gradient_norms(model)
@@ -661,7 +615,7 @@ def main():
     
     print("\n" + "="*60)
     print("TRAINING (with anti-collapse fixes)")
-    print("  - KL-to-uniform loss (kl_weight=0.5)")
+    print("  - Z-loss for router stability")
     print("  - Temperature annealing (2.0 -> 1.0)")
     print("  - Separate router optimizer (5x LR)")
     print("  - Min-prob floor (alpha=0.01)")
@@ -683,16 +637,11 @@ def main():
         temperature = 2.0 * (0.9 ** epoch)  # Exponential decay
         temperature = max(temperature, 1.0)  # Don't go below 1.0
         
-        # === KL weight annealing ===
-        # Start strong (0.5), decay slightly to allow specialization
-        kl_weight = 0.5 * (0.95 ** epoch)
-        kl_weight = max(kl_weight, 0.2)  # Don't go below 0.2
-        
         print(f"\n{'='*60}")
-        print(f"Epoch {epoch+1}/{config['epochs']} | temp={temperature:.2f}, kl_weight={kl_weight:.3f}")
+        print(f"Epoch {epoch+1}/{config['epochs']} | temp={temperature:.2f}")
         print(f"{'='*60}")
         
-        train_losses = train_epoch(model, train_loader, optimizer, router_optimizer, device, epoch+1, temperature=temperature, kl_weight=kl_weight)
+        train_losses = train_epoch(model, train_loader, optimizer, router_optimizer, device, epoch+1, temperature=temperature)
         val_loss, perplexity = evaluate(model, val_loader, device)
         
         fusion_stats = get_model_stats(model, device, sample_batch)
