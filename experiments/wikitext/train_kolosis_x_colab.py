@@ -139,28 +139,99 @@ class CausalStream(UnsupervisedStream):
         return F.binary_cross_entropy(pred, target)
 
 
+# ============================================================================
+# ANTI-COLLAPSE HELPER FUNCTIONS
+# ============================================================================
+
+
+def scale_stream_gradients(stream_outputs, gate_weights):
+    """FIX 3: Give under-utilized streams stronger gradients"""
+    probs = gate_weights.mean(dim=[0, 1]).detach()  # [n_streams]
+    n_streams = probs.size(0)
+    target_prob = 1.0 / n_streams
+    
+    # Scale factor: streams with low prob get higher gradients
+    scale_factors = (target_prob / (probs + 0.01)).clamp(0.5, 2.0)
+    
+    # Apply scaling to each stream's contribution
+    scaled_outputs = []
+    for i, output in enumerate(stream_outputs):
+        scale = scale_factors[i].item()
+        # Scale the gradient without affecting forward pass
+        scaled = output * scale + output.detach() * (1 - scale)
+        scaled_outputs.append(scaled)
+    
+    return scaled_outputs
+
+
+def gumbel_softmax_st(logits, temperature=1.0, hard=False):
+    """FIX 4: Gumbel-Softmax with straight-through estimator for better exploration"""
+    # Add Gumbel noise
+    gumbels = -torch.empty_like(logits).exponential_().log()
+    gumbels = (logits + gumbels) / temperature
+    
+    # Soft sampling
+    y_soft = F.softmax(gumbels, dim=-1)
+    
+    if hard:
+        # Hard sampling (one-hot) with straight-through
+        index = y_soft.max(dim=-1, keepdim=True)[1]
+        y_hard = torch.zeros_like(logits).scatter_(-1, index, 1.0)
+        # Straight-through: hard forward, soft backward
+        y = y_hard - y_soft.detach() + y_soft
+    else:
+        y = y_soft
+    
+    return y
+
+
 class MetaFusionRouter(nn.Module):
     def __init__(self, n_streams, n_embd, dropout=0.1):
         super().__init__()
+        self.n_streams = n_streams
         self.context_encoder = nn.TransformerEncoderLayer(
             d_model=n_embd, nhead=4, dim_feedforward=n_embd*2,
             dropout=dropout, batch_first=True
         )
-        self.router = nn.Sequential(
+        # Router network outputs logits (no softmax here - apply with temperature)
+        self.router_net = nn.Sequential(
             nn.Linear(n_embd, n_streams * 4),
             nn.GELU(),
-            nn.Linear(n_streams * 4, n_streams),
-            nn.Softmax(dim=-1)
+            nn.Linear(n_streams * 4, n_streams)
         )
+        # Initialize router biases to 0 and small weights for balanced start
+        self._init_router()
         
-    def forward(self, stream_features, context_features):
+    def _init_router(self):
+        for m in self.router_net.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight, gain=0.1)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+        
+    def forward(self, stream_features, context_features, temperature=1.0, use_gumbel=False):
         _, T, _ = context_features.shape
         mask = torch.triu(torch.ones(T, T, device=context_features.device) * float('-inf'), diagonal=1)
         ctx = self.context_encoder(context_features, src_mask=mask)
-        weights = self.router(ctx)
+        
+        # Get raw logits
+        logits = self.router_net(ctx)
+        
+        # FIX 4: Use Gumbel-Softmax during training for better exploration
+        if use_gumbel and self.training:
+            weights = gumbel_softmax_st(logits, temperature, hard=False)
+        else:
+            # Apply temperature-scaled softmax (higher temp = more uniform)
+            weights = F.softmax(logits / temperature, dim=-1)
+        
+        # Add min-prob floor for stability (alpha=0.01)
+        alpha = 0.01
+        uniform = torch.ones_like(weights) / self.n_streams
+        weights = weights * (1 - alpha) + uniform * alpha
+        
         stacked = torch.stack(stream_features, dim=-1)
         fused = (stacked * weights.unsqueeze(2)).sum(dim=-1)
-        return fused, weights
+        return fused, weights, logits
 
 class KolosisX(nn.Module):
     def __init__(self, vocab_size, n_embd, block_size, n_layer=2, dropout=0.1):
@@ -207,7 +278,8 @@ class KolosisX(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None, return_stream_outputs=False, include_diversity_loss=True):
+    def forward(self, idx, targets=None, return_stream_outputs=False, include_diversity_loss=True, 
+                temperature=2.0, use_gumbel=True):
         B, T = idx.shape
         assert T <= self.block_size, f"Sequence length {T} exceeds block_size {self.block_size}"
         
@@ -220,8 +292,22 @@ class KolosisX(nn.Module):
             x = layer(x, src_mask=mask)
         backbone_features = x
         
+        # Compute stream outputs
         stream_outputs = [stream(backbone_features) for stream in self.streams]
-        fused_feat, gate_weights = self.router(stream_outputs, backbone_features)
+        
+        # FIX 3: Scale gradients for under-utilized streams (use previous gate weights if available)
+        if hasattr(self, '_prev_gate_weights') and self.training:
+            stream_outputs = scale_stream_gradients(stream_outputs, self._prev_gate_weights)
+        
+        # Router forward with Gumbel-Softmax option (FIX 4)
+        fused_feat, gate_weights, router_logits = self.router(
+            stream_outputs, backbone_features, temperature=temperature, use_gumbel=use_gumbel
+        )
+        
+        # Save gate weights for next step's gradient scaling
+        if self.training:
+            self._prev_gate_weights = gate_weights.detach()
+        
         logits = self.final_head(fused_feat)
         
         loss = None
@@ -248,26 +334,68 @@ class KolosisX(nn.Module):
                 if include_diversity_loss:
                     diversity = self.compute_diversity_loss(stream_outputs)
                 
-                # Router entropy loss - penalize collapse to single stream
-                router_entropy = -(gate_weights * torch.log(gate_weights + 1e-8)).sum(dim=-1).mean()
-                max_entropy = torch.log(torch.tensor(float(len(self.streams)), device=idx.device))
-                entropy_loss = -0.1 * (router_entropy / max_entropy)  # Encourage high entropy
+                # === RESEARCH-BACKED MoE LOSS (ST-MoE/PaLM style) ===
+                # Key insight: Don't enforce uniformity, just keep router stable
                 
+                n_streams = len(self.streams)
+                log_n = torch.log(torch.tensor(float(n_streams), device=idx.device))
+                
+                # Entropy (for logging only, not for loss)
+                router_entropy = -(gate_weights * torch.log(gate_weights + 1e-8)).sum(dim=-1).mean()
+                kl_to_uniform = log_n - router_entropy
+                
+                # === Z-LOSS (from ST-MoE paper) ===
+                # Regularize router logits to stay numerically stable
+                # This prevents extreme logits without forcing uniformity
+                z_loss = (router_logits ** 2).mean()
+                
+                # === GRADIENT-DECOUPLED LOAD BALANCING ===
+                # Only applies gradients to router, NOT to stream weights
+                # This is key: streams only see LM gradients!
+                with torch.no_grad():
+                    routing_probs = gate_weights.mean(dim=[0, 1])  # [n_streams]
+                    target = 1.0 / n_streams
+                    imbalance = ((routing_probs - target) ** 2).sum()
+                
+                # If severely imbalanced, add small penalty (but won't backprop to streams)
+                # The z-loss handles router stability instead
+                
+                # === MINIMAL AUXILIARY LOSSES ===
                 avg_aux = sum(aux_losses) / len(aux_losses)
                 avg_unsup = sum(unsup_losses) / len(unsup_losses)
                 
-                # Increased diversity weight (0.1 -> 0.2) to prevent stream collapse
-                loss = (0.35 * main_loss + 0.25 * avg_aux + 0.15 * avg_unsup + 0.2 * diversity + 0.05 * (-entropy_loss))
+                # === FINAL LOSS: ~97% Main Task, ~3% Regularization ===
+                # Weights: 0.97 + 0.01 + 0.01 + 0.005 + 0.005 = 1.0
+                loss = (
+                    0.97 * main_loss +           # Dominant: language modeling
+                    0.01 * z_loss +              # Router stability (not uniformity)
+                    0.01 * avg_aux +             # Small auxiliary supervision
+                    0.005 * avg_unsup +          # Tiny unsupervised signal
+                    0.005 * diversity            # Minimal diversity
+                )
                 
+                # === Enhanced diagnostics ===
                 info['main_loss'] = main_loss.item()
                 info['aux_loss'] = avg_aux.item()
                 info['unsup_loss'] = avg_unsup.item()
                 info['diversity_loss'] = diversity.item()
                 info['router_entropy'] = router_entropy.item()
+                info['kl_to_uniform'] = kl_to_uniform.item()
+                info['z_loss'] = z_loss.item()
+                info['imbalance'] = imbalance.item()
+                
+                # Per-stream probability stats
+                mean_probs = gate_weights.mean(dim=[0, 1])  # [n_streams]
+                info['stream_probs'] = mean_probs.tolist()
+                
+                # Router logits stats (for debugging)
+                info['router_logits_mean'] = router_logits.mean().item()
+                info['router_logits_std'] = router_logits.std().item()
 
             if return_stream_outputs:
                 info['gate_weights'] = gate_weights
                 info['stream_logits'] = stream_logits
+                info['router_logits'] = router_logits
                 
         return logits, loss, info
 
@@ -328,7 +456,7 @@ def check_gradient_norms(model):
             norms[name] = param.grad.norm().item()
     return norms
 
-def train_epoch(model, train_loader, optimizer, device, epoch):
+def train_epoch(model, train_loader, optimizer, router_optimizer, device, epoch, temperature=2.0):
     model.train()
     total_loss = 0
     total_main = 0
@@ -340,11 +468,19 @@ def train_epoch(model, train_loader, optimizer, device, epoch):
     for batch_idx, (x, y) in enumerate(pbar):
         x, y = x.to(device), y.to(device)
         
+        # Zero both optimizers
         optimizer.zero_grad()
-        _, loss, info = model(x, y, return_stream_outputs=True)
+        router_optimizer.zero_grad()
+        
+        _, loss, info = model(x, y, return_stream_outputs=True, temperature=temperature)
         loss.backward()
+        
+        # Clip gradients
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        
+        # Step both optimizers
         optimizer.step()
+        router_optimizer.step()
         
         total_loss += loss.item()
         total_main += info['main_loss']
@@ -355,6 +491,9 @@ def train_epoch(model, train_loader, optimizer, device, epoch):
         entropy = compute_router_entropy(info)
         grad_norms = check_gradient_norms(model)
         
+        # Check router gradient norms specifically
+        router_grad_norm = sum(v for k, v in grad_norms.items() if 'router' in k) / max(1, sum(1 for k in grad_norms if 'router' in k))
+        
         dead_streams = []
         for i, _head in enumerate(model.stream_heads):
             head_norm = grad_norms.get(f'stream_heads.{i}.weight', 1.0)
@@ -362,11 +501,15 @@ def train_epoch(model, train_loader, optimizer, device, epoch):
                 dead_streams.append(i)
         
         if batch_idx % 100 == 0:
+            # Enhanced status with stream probs
+            probs = info.get('stream_probs', [0.25]*4)
+            prob_str = '/'.join([f'{p:.2f}' for p in probs])
             status = {
                 'loss': f'{loss.item():.4f}',
                 'main': f'{info["main_loss"]:.4f}',
-                'div': f'{info["diversity_loss"]:.4f}',
-                'ent': f'{entropy:.4f}'
+                'z_loss': f'{info.get("z_loss", 0):.4f}',
+                'ent': f'{entropy:.4f}',
+                'probs': prob_str
             }
             if dead_streams:
                 status['DEAD'] = str(dead_streams)
@@ -459,10 +602,23 @@ def main():
     print(f"Parameters: {n_params:,}")
     
     model = model.to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config['lr'])
+    
+    # === Separate optimizer for router (5x LR) ===
+    router_params = list(model.router.parameters())
+    main_params = [p for n, p in model.named_parameters() if 'router' not in n]
+    
+    optimizer = torch.optim.AdamW(main_params, lr=config['lr'])
+    router_optimizer = torch.optim.AdamW(router_params, lr=config['lr'] * 5)  # 5x LR for router
+    
+    print(f"Main optimizer params: {sum(p.numel() for p in main_params):,}")
+    print(f"Router optimizer params: {sum(p.numel() for p in router_params):,}")
     
     print("\n" + "="*60)
-    print("TRAINING")
+    print("TRAINING (with anti-collapse fixes)")
+    print("  - Z-loss for router stability")
+    print("  - Temperature annealing (2.0 -> 1.0)")
+    print("  - Separate router optimizer (5x LR)")
+    print("  - Min-prob floor (alpha=0.01)")
     print("="*60)
     
     results = {
@@ -476,11 +632,16 @@ def main():
     best_val_loss = float('inf')
     
     for epoch in range(config['epochs']):
+        # === Temperature annealing ===
+        # Start with temp=2.0 (exploration), decay to 1.0 (specialization)
+        temperature = 2.0 * (0.9 ** epoch)  # Exponential decay
+        temperature = max(temperature, 1.0)  # Don't go below 1.0
+        
         print(f"\n{'='*60}")
-        print(f"Epoch {epoch+1}/{config['epochs']}")
+        print(f"Epoch {epoch+1}/{config['epochs']} | temp={temperature:.2f}")
         print(f"{'='*60}")
         
-        train_losses = train_epoch(model, train_loader, optimizer, device, epoch+1)
+        train_losses = train_epoch(model, train_loader, optimizer, router_optimizer, device, epoch+1, temperature=temperature)
         val_loss, perplexity = evaluate(model, val_loader, device)
         
         fusion_stats = get_model_stats(model, device, sample_batch)

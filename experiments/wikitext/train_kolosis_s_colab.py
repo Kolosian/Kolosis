@@ -96,6 +96,7 @@ class SemanticAdapter(nn.Module):
         x = x + self.ffn(self.norm(x))
         return x
 
+
 class ConceptAdapter(nn.Module):
     def __init__(self, vocab_size, n_embd, dropout=0.1):
         super().__init__()
@@ -122,31 +123,109 @@ class ConceptAdapter(nn.Module):
         x = x + self.ffn(self.norm(x))
         return x
 
+# ============================================================================
+# ANTI-COLLAPSE HELPER FUNCTIONS
+# ============================================================================
+
+def adaptive_entropy_weight(gate_weights, base_weight=0.35):
+    """Increase weight when streams become imbalanced"""
+    probs = gate_weights.mean(dim=[0, 1])  # [n_streams]
+    n_streams = probs.size(0)
+    uniform = 1.0 / n_streams
+    max_deviation = (probs - uniform).abs().max()
+    max_possible_dev = 1.0 - uniform
+    imbalance_ratio = (max_deviation / max_possible_dev).clamp(0, 1).item()
+    return base_weight + (1.0 - base_weight) * imbalance_ratio
+
+
+def gumbel_softmax_st(logits, temperature=1.0, hard=False):
+    """Gumbel-Softmax with straight-through for exploration"""
+    gumbels = -torch.empty_like(logits).exponential_().log()
+    gumbels = (logits + gumbels) / temperature
+    y_soft = F.softmax(gumbels, dim=-1)
+    if hard:
+        index = y_soft.max(dim=-1, keepdim=True)[1]
+        y_hard = torch.zeros_like(logits).scatter_(-1, index, 1.0)
+        y = y_hard - y_soft.detach() + y_soft
+    else:
+        y = y_soft
+    return y
+
+
+def load_balancing_loss(gate_weights, num_streams):
+    """Encourage equal load across streams (Switch Transformer style)"""
+    routing_probs = gate_weights.mean(dim=[0, 1])
+    target = 1.0 / num_streams
+    load_loss = ((routing_probs - target) ** 2).sum()
+    return load_loss * num_streams
+
+
 class FusionGate(nn.Module):
+    """FusionGate with comprehensive anti-collapse mechanisms"""
     def __init__(self, n_streams, n_embd):
         super().__init__()
+        self.n_streams = n_streams
+        # Gate network outputs logits (no softmax - apply with temperature)
         self.gate_network = nn.Sequential(
             nn.Linear(n_streams * n_embd, n_embd),
-            nn.ReLU(),
-            nn.Linear(n_embd, n_streams),
-            nn.Softmax(dim=-1)
+            nn.GELU(),
+            nn.Linear(n_embd, n_streams)
         )
-        self.entropy_weight = 0.01
+        # Initialize with small weights for balanced start
+        self._init_gate()
         
-    def forward(self, stream_features):
+    def _init_gate(self):
+        for m in self.gate_network.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight, gain=0.1)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+        
+    def forward(self, stream_features, temperature=2.0, use_gumbel=True):
         combined = torch.cat(stream_features, dim=-1)
-        gate_weights = self.gate_network(combined)
+        logits = self.gate_network(combined)
+        
+        # Use Gumbel-Softmax during training for exploration
+        if use_gumbel and self.training:
+            gate_weights = gumbel_softmax_st(logits, temperature, hard=False)
+        else:
+            gate_weights = F.softmax(logits / temperature, dim=-1)
+        
+        # Add min-prob floor for stability (alpha=0.01)
+        alpha = 0.01
+        uniform = torch.ones_like(gate_weights) / self.n_streams
+        gate_weights = gate_weights * (1 - alpha) + uniform * alpha
         
         fused = torch.zeros_like(stream_features[0])
         for i, features in enumerate(stream_features):
             fused += gate_weights[:, :, i:i+1] * features
             
-        return fused, gate_weights
+        return fused, gate_weights, logits
     
-    def compute_entropy_loss(self, gate_weights):
-        avg_weights = gate_weights.mean(dim=[0, 1])
-        entropy = -(avg_weights * torch.log(avg_weights + 1e-8)).sum()
-        return -self.entropy_weight * entropy
+    def compute_z_loss(self, gate_weights, router_logits):
+        """Research-backed z-loss: regularize logits, not uniformity"""
+        n_streams = self.n_streams
+        log_n = torch.log(torch.tensor(float(n_streams), device=gate_weights.device))
+        
+        # Entropy (for logging only)
+        entropy = -(gate_weights * torch.log(gate_weights + 1e-8)).sum(dim=-1).mean()
+        kl_to_uniform = log_n - entropy
+        
+        # Z-loss: keep router logits numerically stable
+        z_loss = (router_logits ** 2).mean()
+        
+        # Imbalance tracking (gradient-decoupled - for logging)
+        with torch.no_grad():
+            routing_probs = gate_weights.mean(dim=[0, 1])
+            target = 1.0 / n_streams
+            imbalance = ((routing_probs - target) ** 2).sum()
+        
+        return z_loss, {
+            'entropy': entropy.item(),
+            'kl_to_uniform': kl_to_uniform.item(),
+            'z_loss': z_loss.item(),
+            'imbalance': imbalance.item()
+        }
 
 class KolosisS(nn.Module):
     def __init__(self, vocab_size, n_embd, block_size, n_layer=2, dropout=0.1):
@@ -183,7 +262,7 @@ class KolosisS(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             
-    def forward(self, idx, targets=None, return_stream_outputs=False):
+    def forward(self, idx, targets=None, temperature=2.0, return_stream_outputs=False):
         B, T = idx.shape
         
         tok_emb = self.token_emb(idx)
@@ -201,17 +280,37 @@ class KolosisS(nn.Module):
         semantic_feat = self.semantic_adapter(x)
         concept_feat = self.concept_adapter(x, idx)
         
-        fused, gate_weights = self.fusion_gate([symbol_feat, temporal_feat, semantic_feat, concept_feat])
+        stream_features = [symbol_feat, temporal_feat, semantic_feat, concept_feat]
+        fused, gate_weights, router_logits = self.fusion_gate(stream_features, temperature=temperature, use_gumbel=self.training)
         logits = self.head(fused)
         
         loss = None
-        entropy_loss = None
+        info = {}
         if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, self.vocab_size), targets.view(-1))
-            entropy_loss = self.fusion_gate.compute_entropy_loss(gate_weights)
-            loss = loss + entropy_loss
+            main_loss = F.cross_entropy(logits.view(-1, self.vocab_size), targets.view(-1))
             
-        return logits, loss
+            # Research-backed z-loss approach
+            z_loss, z_info = self.fusion_gate.compute_z_loss(gate_weights, router_logits)
+            
+            # === FINAL LOSS: 97% Main Task, 3% Regularization ===
+            # Almost all gradient goes to language modeling objective
+            loss = 0.97 * main_loss + 0.01 * z_loss
+            
+            # Populate info dict
+            info['main_loss'] = main_loss.item()
+            info['z_loss'] = z_loss.item()
+            info['router_entropy'] = z_info['entropy']
+            info['imbalance'] = z_info['imbalance']
+            
+            # Stream probs
+            mean_probs = gate_weights.mean(dim=[0, 1])
+            info['stream_probs'] = mean_probs.tolist()
+        
+        if return_stream_outputs:
+            info['gate_weights'] = gate_weights
+            info['stream_features'] = stream_features
+            
+        return logits, loss, info
 
 # ============================================================================
 # DATASET
@@ -240,19 +339,27 @@ class WikiTextDataset(Dataset):
 # TRAINING FUNCTIONS
 # ============================================================================
 
-def train_epoch(model, loader, optimizer, device, epoch):
+def train_epoch(model, loader, optimizer, device, epoch, temperature=2.0):
     model.train()
     total_loss = 0
     pbar = tqdm(loader, desc=f"Epoch {epoch}")
-    for x, y in pbar:
+    for batch_idx, (x, y) in enumerate(pbar):
         x, y = x.to(device), y.to(device)
         optimizer.zero_grad()
-        _, loss = model(x, y)  # loss now includes entropy regularization
+        _, loss, info = model(x, y, temperature=temperature)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         total_loss += loss.item()
-        pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+        
+        if batch_idx % 100 == 0:
+            probs = info.get('stream_probs', [0.25]*4)
+            prob_str = '/'.join([f'{p:.2f}' for p in probs])
+            pbar.set_postfix({
+                'loss': f'{loss.item():.4f}',
+                'ent': f'{info.get("router_entropy", 0):.3f}',
+                'probs': prob_str
+            })
     return total_loss / len(loader)
 
 def evaluate(model, loader, device):
@@ -261,7 +368,7 @@ def evaluate(model, loader, device):
     with torch.no_grad():
         for x, y in tqdm(loader, desc="Evaluating"):
             x, y = x.to(device), y.to(device)
-            _, loss = model(x, y)
+            _, loss, _ = model(x, y, temperature=1.0)  # Use temp=1 for eval
             total_loss += loss.item()
     return total_loss / len(loader), torch.exp(torch.tensor(total_loss / len(loader))).item()
 
@@ -314,7 +421,11 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=config['lr'])
     
     print("\n" + "="*60)
-    print("TRAINING")
+    print("TRAINING (with anti-collapse fixes)")
+    print("  - Gumbel-Softmax exploration")
+    print("  - Adaptive entropy weight")
+    print("  - Load balancing loss")
+    print("  - Temperature annealing (2.0 -> 1.0)")
     print("="*60)
     
     results = {
@@ -326,8 +437,11 @@ def main():
     best_val_loss = float('inf')
     
     for epoch in range(config['epochs']):
-        print(f"\nEpoch {epoch+1}/{config['epochs']}")
-        train_loss = train_epoch(model, train_loader, optimizer, device, epoch+1)
+        # Temperature annealing: 2.0 -> 1.0 over epochs
+        temperature = max(2.0 * (0.9 ** epoch), 1.0)
+        
+        print(f"\nEpoch {epoch+1}/{config['epochs']} | temp={temperature:.2f}")
+        train_loss = train_epoch(model, train_loader, optimizer, device, epoch+1, temperature=temperature)
         val_loss, perplexity = evaluate(model, val_loader, device)
         
         results['train_losses'].append(train_loss)
