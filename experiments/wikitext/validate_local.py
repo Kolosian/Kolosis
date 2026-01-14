@@ -66,16 +66,16 @@ def validate():
         
         for sentence in sentences:
             tokens = tokenizer.encode(sentence, return_tensors='pt').to(device)
-        
-        with torch.no_grad():
-            logits, loss, info = model(tokens, return_stream_outputs=True)
-            gate_weights = info['gate_weights'] # [B, T, 4]
-            
-            # Average over time dimension
-            avg_weights = gate_weights.mean(dim=[0, 1]).cpu().numpy()
-            
-            results[category]['counts'] += avg_weights
-            results[category]['total'] += 1
+            with torch.no_grad():
+                logits, loss, info = model(tokens, return_stream_outputs=True)
+                gate_weights = info['gate_weights'] # [B, T, 4]
+                
+                # Average over time dimension
+                avg_weights = gate_weights.mean(dim=[0, 1]).cpu().numpy()
+                
+                results[category]['counts'] += avg_weights
+                results[category]['total'] += 1
+
 
     # 5. Print Report
     print("\n" + "="*60)
