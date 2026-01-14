@@ -1,8 +1,9 @@
 # Kolosis Development Journey: From Concept to Research-Backed Implementation
 
 **Document Version:** 2.0  
-**Last Updated:** 2025-12-06  
-**Status:** ✅ Training Complete (WikiText-103 Validated)
+**Last Updated:** 2025-12-09
+**Status:** 🔄 Aligning for Explainability (Phase 8)
+**Entity:** Kolosian
 
 ---
 
@@ -729,6 +730,49 @@ loss = 0.30 * main_loss + 0.20 * diversity + 0.20 * entropy
    - Knowledge graph stream + neural streams
    - Router decides when to use symbolic reasoning
 
+### Phase 6: Explainability Validation (Kolosis-S)
+
+**Goal:** Prove that **Kolosis-S** (the streamlined 4-stream model) has interpretable routing.
+**Method:** Created a labeled dataset (Temporal, Causal, Conceptual) and measured alignment on the 27.4M parameter model.
+
+**Result:** ❌ **Failure (25% Alignment)**
+- **Concept** stream dominated all inputs (40-50% usage)
+- **Temporal** stream was not used for temporal sentences
+- **Conclusion:** The router treats streams as "experts at portions of the vocabulary" rather than "experts at linguistic structures".
+
+### Phase 7: The "Modular Pivot" Proposal (Week 5)
+
+**Proposal:** Pivot value proposition from "Explainability" to "Modular Efficiency".
+- *Idea:* Pitch Kolosis as a tool for fine-tuning specific streams (e.g., Medical Concept Stream) without catastrophic forgetting.
+- *Status:* **Rejected by User**.
+- *Reason:* User prioritized true explainability over efficiency.
+
+### Phase 8: Forced Specialization (Kolosis-S)
+
+**New Strategy:** "If Kolosis-S won't learn to specialize naturally, force it."
+
+**Implementation:** [`experiments/wikitext/finetune_specialization.py`](file:///home/imsarthakshrma/Projects/RIIK/experiments/wikitext/finetune_specialization.py)
+- **Auxiliary Loss:** `loss = main_loss + alpha * cross_entropy(router_probs, target_stream)`
+- **Targets:**
+    - Temporal sentences → Stream 1
+    - Causal sentences → Stream 2
+    - Conceptual sentences → Stream 3
+- **Goal:** Retrain router to Align >60% with human intuition.
+
+### Phase 9: RL Router Optimization (Kolosis-S)
+
+**Current Status (Week 6):** Pivoting to a perplexity-first optimization due to "forced specialization" limitations.
+
+**Strategy:** 
+Use **Reinforcement Learning (RL)** to teach the Kolosis-S router to pick the stream that *would have* minimized loss (Counterfactual Training).
+
+**Plan:** [`experiments/wikitext/train_router_rl_s.py`](file:///home/imsarthakshrma/Projects/RIIK/experiments/wikitext/train_router_rl_s.py)
+1.  **Diagnostic:** Check if router is suboptimal (Target: >65% optimality gap).
+2.  **Frozen Experts:** Freeze all 4 streams (Symbol, Temporal, Semantic, Concept).
+3.  **Policy Gradient:** Train *only* the router using `Advantage = Min_Stream_Loss - Chosen_Stream_Loss`.
+
+**Hypothesis:** Can we squeeze 0.3-0.5 PPL improvement purely by making the router smarter?
+
 ---
 
 ## File References
@@ -883,4 +927,4 @@ This principle, derived from ST-MoE/PaLM research and **now validated on Kolosis
 
 ---
 
-*Document maintained by the Kolosis development team. Training completed: December 2024.*
+*Document maintained by the Kolosis development team. Training completed: December 2025.*
