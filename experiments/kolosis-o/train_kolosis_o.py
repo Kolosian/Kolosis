@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
-from transformers import GPT2Tokenizer
+from transformers import AutoTokenizer
 from datasets import load_dataset
 import json
 from tqdm import tqdm
@@ -74,7 +74,8 @@ def evaluate(model, loader, device):
 
 def main():
     config = {
-        'vocab_size': 50257,
+        'pretrained_tokenizer_name': "Xenova/gpt-4", # GPT-4 tokenizer (cl100k_base)
+        'vocab_size': 100277, # Size for cl100k_base
         'n_embd': 256,
         'n_head': 8,
         'n_kv_head': 2,
@@ -91,8 +92,16 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Device: {device}")
     
-    tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
-    tokenizer.pad_token = tokenizer.eos_token
+    print(f"Loading '{config['pretrained_tokenizer_name']}' tokenizer...")
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(config['pretrained_tokenizer_name'])
+    except Exception as e:
+        print(f"Failed to load primary tokenizer: {e}")
+        print("Fallback: Using GPT2Tokenizer (Warning: Mismatch in vocab size possible)")
+        tokenizer = AutoTokenizer.from_pretrained('gpt2')
+        
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     
     print("Loading WikiText-103...")
     dataset = load_dataset('wikitext', 'wikitext-103-v1')
