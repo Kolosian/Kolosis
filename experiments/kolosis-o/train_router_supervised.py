@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
-from transformers import GPT2Tokenizer
+from transformers import AutoTokenizer
 import json
 import os
 import sys
@@ -69,7 +69,9 @@ def train_router_imitation():
     }
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+    tokenizer = AutoTokenizer.from_pretrained("Xenova/gpt-4")
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     
     # 2. Data
     if not os.path.exists(config["data_path"]):
@@ -89,7 +91,7 @@ def train_router_imitation():
         block_size=config["block_size"]
     ).to(device)
     
-    # ❄️ FREEZE BACKBONE: Only train RLGate in each block
+    # FREEZE BACKBONE: Only train RLGate in each block
     for name, param in model.named_parameters():
         if "rl_gate" not in name:
             param.requires_grad = False
