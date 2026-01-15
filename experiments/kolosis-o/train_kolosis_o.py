@@ -94,12 +94,11 @@ def main():
     
     print(f"Loading '{config['pretrained_tokenizer_name']}' tokenizer...")
     try:
-        from transformers import AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained(config['pretrained_tokenizer_name'])
     except Exception as e:
         print(f"Failed to load primary tokenizer: {e}")
         print("Fallback: Using GPT2Tokenizer (Warning: Mismatch in vocab size possible)")
-        tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+        tokenizer = AutoTokenizer.from_pretrained('gpt2')
         
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
